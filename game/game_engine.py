@@ -9,8 +9,8 @@ class GameEngine:
         self.width = width
         self.height = height
         self.rope = Rope(width, height)
-        self.player = Puller(90, height // 2, (50, 120, 220), "PLAYER (A/D)")
-        self.computer = Puller(width - 90, height // 2, (220, 80, 50), "COMPUTER")
+        self.player = Puller(90, height // 2, (50, 120, 220), "PLAYER (A/D)", facing=1)
+        self.computer = Puller(width - 90, height // 2, (220, 80, 50), "COMPUTER", facing=-1)
 
         self.last_key = None
         self.winner = None
@@ -21,12 +21,17 @@ class GameEngine:
         self.computer_pull_cooldown = self.base_pull_cooldown
         self.last_computer_pull = pygame.time.get_ticks()
 
-        # Panic surge settings
-        self.panic_start = 0.6             # panic once player is 60% of the way to winning
-        self.panic_min_cooldown = 150      # fastest pull interval at max panic (ms)
-        self.panic_max_strength = 1.2      # strength multiplier at max panic
+        # Panic surge settings (Task 2)
+        self.panic_start = 0.6
+        self.panic_min_cooldown = 150
+        self.panic_max_strength = 1.2
         self.panic_active = False
-        self.panic_intensity = 0.0         # 0.0 = calm, 1.0 = max panic
+        self.panic_intensity = 0.0
+
+        # Animation state (Task 3)
+        self.player_activity = 0.0         # rises when player mashes, decays over time
+        self.momentum = 0.0                # smoothed flag movement (+ = toward computer)
+        self.prev_marker_x = self.rope.marker_x
 
         self.font_big = pygame.font.SysFont(None, 48)
         self.font_small = pygame.font.SysFont(None, 26)
@@ -44,13 +49,14 @@ class GameEngine:
             if event.key != self.last_key:
                 self.rope.pull_left(1.0)
                 self.last_key = event.key
+                self.player_activity += 0.25
 
     def update_panic(self):
         """Work out how scared the computer is based on how close the player is to winning."""
         center = self.width / 2
         distance_to_player_goal = center - self.rope.left_win_x
         progress = (center - self.rope.marker_x) / distance_to_player_goal
-        progress = max(0.0, min(1.0, progress))   # 0 = center, 1 = player's goal line
+        progress = max(0.0, min(1.0, progress))
 
         if progress >= self.panic_start:
             self.panic_active = True
@@ -59,11 +65,28 @@ class GameEngine:
             self.panic_active = False
             self.panic_intensity = 0.0
 
-        # Faster pulls the more panicked it is
         self.computer_pull_cooldown = int(
             self.base_pull_cooldown
             - (self.base_pull_cooldown - self.panic_min_cooldown) * self.panic_intensity
         )
+
+    def update_animations(self):
+        """Rope tension and puller leaning based on struggle and momentum."""
+        # Struggle intensity -> rope tension
+        self.player_activity *= 0.95
+        tension = self.player_activity
+        if self.panic_active:
+            tension += 0.3 + 0.4 * self.panic_intensity
+        self.rope.set_tension(min(1.0, tension))
+
+        # Momentum -> who leans back
+        velocity = self.rope.marker_x - self.prev_marker_x
+        self.prev_marker_x = self.rope.marker_x
+        self.momentum = self.momentum * 0.9 + velocity * 0.1
+        advantage = max(-1.0, min(1.0, -self.momentum / 2.0))   # +1 = player winning
+
+        self.player.update_lean(6 + 14 * advantage)
+        self.computer.update_lean(6 - 14 * advantage)
 
     def update(self):
         if self.game_state != "PLAYING":
@@ -75,11 +98,12 @@ class GameEngine:
         if now - self.last_computer_pull >= self.computer_pull_cooldown:
             computer_variance = random.uniform(0.7, 1.2)
             if self.panic_active:
-                # Stronger pulls during panic (1.1x up to panic_max_strength)
                 surge = 1.1 + (self.panic_max_strength - 1.1) * self.panic_intensity
                 computer_variance *= surge
             self.rope.pull_right(computer_variance)
             self.last_computer_pull = now
+
+        self.update_animations()
 
         result = self.rope.check_winner()
         if result:
@@ -88,12 +112,17 @@ class GameEngine:
 
     def reset(self):
         self.rope.reset()
+        self.player.reset()
+        self.computer.reset()
         self.last_key = None
         self.winner = None
         self.game_state = "PLAYING"
         self.computer_pull_cooldown = self.base_pull_cooldown
         self.panic_active = False
         self.panic_intensity = 0.0
+        self.player_activity = 0.0
+        self.momentum = 0.0
+        self.prev_marker_x = self.rope.marker_x
         self.last_computer_pull = pygame.time.get_ticks()
 
     def render(self, screen):
@@ -103,15 +132,14 @@ class GameEngine:
         pygame.draw.rect(screen, (45, 38, 30), mud_rect, border_radius=12)
 
         self.rope.render(screen)
-        self.player.render(screen)
-        self.computer.render(screen)
+        self.player.render(screen, self.rope.get_y_at(self.player.x + 30))
+        self.computer.render(screen, self.rope.get_y_at(self.computer.x - 30))
 
         inst_surf = self.font_small.render(
             "Alternate [A] and [D] keys rapidly to pull!", True, (210, 210, 210)
         )
         screen.blit(inst_surf, (self.width // 2 - inst_surf.get_width() // 2, 40))
 
-        # Flashing panic warning
         if self.panic_active and self.game_state == "PLAYING":
             if (pygame.time.get_ticks() // 200) % 2 == 0:
                 panic_surf = self.font_big.render("COMPUTER PANIC!", True, (255, 70, 70))

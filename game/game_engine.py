@@ -29,12 +29,23 @@ class GameEngine:
         self.panic_intensity = 0.0
 
         # Animation state (Task 3)
-        self.player_activity = 0.0         # rises when player mashes, decays over time
-        self.momentum = 0.0                # smoothed flag movement (+ = toward computer)
+        self.player_activity = 0.0
+        self.momentum = 0.0
         self.prev_marker_x = self.rope.marker_x
+
+        # Match timer & sudden death (Task 4)
+        self.sudden_death_time = 45        # seconds before sudden death starts
+        self.match_start_time = pygame.time.get_ticks()
+        self.elapsed_seconds = 0.0
+        self.sudden_death = False
 
         self.font_big = pygame.font.SysFont(None, 48)
         self.font_small = pygame.font.SysFont(None, 26)
+        self.font_timer = pygame.font.SysFont(None, 34)
+
+    def power_multiplier(self):
+        """Double pulling power for everyone during sudden death."""
+        return 2.0 if self.sudden_death else 1.0
 
     def handle_event(self, event):
         if self.game_state != "PLAYING":
@@ -47,9 +58,16 @@ class GameEngine:
         # alternating presses can never freeze input.
         if event.type == pygame.KEYDOWN and event.key in (pygame.K_a, pygame.K_d):
             if event.key != self.last_key:
-                self.rope.pull_left(1.0)
+                self.rope.pull_left(1.0 * self.power_multiplier())
                 self.last_key = event.key
                 self.player_activity += 0.25
+
+    def update_timer(self):
+        """Track match time and switch on sudden death at the limit."""
+        now = pygame.time.get_ticks()
+        self.elapsed_seconds = (now - self.match_start_time) / 1000.0
+        if not self.sudden_death and self.elapsed_seconds >= self.sudden_death_time:
+            self.sudden_death = True
 
     def update_panic(self):
         """Work out how scared the computer is based on how close the player is to winning."""
@@ -72,18 +90,18 @@ class GameEngine:
 
     def update_animations(self):
         """Rope tension and puller leaning based on struggle and momentum."""
-        # Struggle intensity -> rope tension
         self.player_activity *= 0.95
         tension = self.player_activity
         if self.panic_active:
             tension += 0.3 + 0.4 * self.panic_intensity
+        if self.sudden_death:
+            tension += 0.3
         self.rope.set_tension(min(1.0, tension))
 
-        # Momentum -> who leans back
         velocity = self.rope.marker_x - self.prev_marker_x
         self.prev_marker_x = self.rope.marker_x
         self.momentum = self.momentum * 0.9 + velocity * 0.1
-        advantage = max(-1.0, min(1.0, -self.momentum / 2.0))   # +1 = player winning
+        advantage = max(-1.0, min(1.0, -self.momentum / 2.0))
 
         self.player.update_lean(6 + 14 * advantage)
         self.computer.update_lean(6 - 14 * advantage)
@@ -92,6 +110,7 @@ class GameEngine:
         if self.game_state != "PLAYING":
             return
 
+        self.update_timer()
         self.update_panic()
 
         now = pygame.time.get_ticks()
@@ -100,6 +119,7 @@ class GameEngine:
             if self.panic_active:
                 surge = 1.1 + (self.panic_max_strength - 1.1) * self.panic_intensity
                 computer_variance *= surge
+            computer_variance *= self.power_multiplier()
             self.rope.pull_right(computer_variance)
             self.last_computer_pull = now
 
@@ -108,7 +128,7 @@ class GameEngine:
         result = self.rope.check_winner()
         if result:
             self.winner = result
-            self.game_state = "GAME_OVER"
+            self.game_state = "GAME_OVER"   # timer freezes here (update stops running)
 
     def reset(self):
         self.rope.reset()
@@ -123,7 +143,18 @@ class GameEngine:
         self.player_activity = 0.0
         self.momentum = 0.0
         self.prev_marker_x = self.rope.marker_x
+        self.match_start_time = pygame.time.get_ticks()
+        self.elapsed_seconds = 0.0
+        self.sudden_death = False
         self.last_computer_pull = pygame.time.get_ticks()
+
+    def render_timer(self, screen):
+        total = int(self.elapsed_seconds)
+        minutes, seconds = divmod(total, 60)
+        timer_text = f"TIME  {minutes}:{seconds:02d}"
+        color = (255, 80, 80) if self.sudden_death else (240, 240, 240)
+        timer_surf = self.font_timer.render(timer_text, True, color)
+        screen.blit(timer_surf, (self.width // 2 - timer_surf.get_width() // 2, 10))
 
     def render(self, screen):
         screen.fill((30, 32, 36))
@@ -135,10 +166,18 @@ class GameEngine:
         self.player.render(screen, self.rope.get_y_at(self.player.x + 30))
         self.computer.render(screen, self.rope.get_y_at(self.computer.x - 30))
 
+        self.render_timer(screen)
+
         inst_surf = self.font_small.render(
             "Alternate [A] and [D] keys rapidly to pull!", True, (210, 210, 210)
         )
         screen.blit(inst_surf, (self.width // 2 - inst_surf.get_width() // 2, 40))
+
+        # Flashing sudden death banner
+        if self.sudden_death and self.game_state == "PLAYING":
+            if (pygame.time.get_ticks() // 300) % 2 == 0:
+                sd_surf = self.font_big.render("SUDDEN DEATH!  x2 POWER", True, (255, 200, 50))
+                screen.blit(sd_surf, (self.width // 2 - sd_surf.get_width() // 2, 75))
 
         if self.panic_active and self.game_state == "PLAYING":
             if (pygame.time.get_ticks() // 200) % 2 == 0:
